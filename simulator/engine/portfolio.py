@@ -143,6 +143,12 @@ class Portfolio:
         candidates.sort(key=lambda c: (abs((c.expiry - leg.expiry).days), abs(c.strike - leg.strike)))
         return candidates[0]
 
+    def find_matching_contract(self, leg: Leg, as_of_date: date,
+                                data_source: OptionDataSource, underlying: str, spot_price: float):
+        """Public lookup: best-effort matching live contract for a leg (full OptionContract, not just price)."""
+        chain = data_source.get_chain(underlying, as_of_date, spot_price)
+        return self._find_matching_contract(leg, chain)
+
     def current_market_price(
         self,
         leg: Leg,
@@ -152,8 +158,7 @@ class Portfolio:
         spot_price: float,
     ) -> float | None:
         """Current mid-price for a single leg, or None if no matching contract found."""
-        chain = data_source.get_chain(underlying, as_of_date, spot_price)
-        contract = self._find_matching_contract(leg, chain)
+        contract = self.find_matching_contract(leg, as_of_date, data_source, underlying, spot_price)
         return contract.mid if contract is not None else None
 
     def mark_to_market(
