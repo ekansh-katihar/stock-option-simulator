@@ -70,6 +70,15 @@ class TradingSession:
         return self._current_date
 
     @property
+    def underlying(self) -> str:
+        return self._underlying
+
+    @property
+    def price_history_bounds(self) -> tuple:
+        """(earliest, latest) dates available in this session's price history."""
+        return min(self._price_history), max(self._price_history)
+
+    @property
     def spot_price(self) -> float:
         return self._price_history[self._current_date]
 
@@ -168,7 +177,8 @@ class TradingSession:
     # ------------------------------------------------------------------
 
     def open_long(self, strike: float | None = None, target_delta: float | None = None,
-                   min_expiry_days: int | None = None, quantity: int = 1) -> dict:
+                   min_expiry_days: int | None = None, max_expiry_days: int | None = None,
+                   quantity: int = 1) -> dict:
         if self._long_leg is not None and self._long_leg.is_open:
             raise ValueError("Long leg already open; close it first.")
 
@@ -178,10 +188,12 @@ class TradingSession:
             target_strike=strike,
             target_delta=target_delta if strike is None else None,
             min_expiry_days=min_expiry_days or self._config.long_min_expiry_days,
+            max_expiry_days=max_expiry_days,
         ) if (strike is not None or target_delta is not None) else find_contract(
             chain, right=OptionRight.CALL,
             target_delta=self._config.long_target_delta,
             min_expiry_days=min_expiry_days or self._config.long_min_expiry_days,
+            max_expiry_days=max_expiry_days,
         )
         if contract is None:
             raise ValueError("No matching long call contract found for the given criteria.")

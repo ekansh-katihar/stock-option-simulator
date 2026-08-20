@@ -8,6 +8,7 @@
  python3 -m simulator.tests.test_portfolio -v
  python3 -m simulator.tests.test_pmcc -v
  python -m simulator.tests.test_engine
+ python -m simulator.tests.test_session_store
  ```
 
  # Run PMCC
@@ -24,3 +25,15 @@ Running an interactive session : Note you need to adapt this script to add your 
 ```
 python3 -m simulator.try_session
 ```
+
+UI using Streamlit 
+
+```
+PYTHONPATH=. streamlit run simulator/ui/app.py
+PYTHONPATH=. streamlit run simulator/ui/app.py --server.port 8080
+#if you want it reachable from another machine on your network, not just localhost
+PYTHONPATH=. streamlit run simulator/ui/app.py --server.port 8080 --server.address 0.0.0.0
+#stops it from trying to auto-open a browser tab (handy if you're running it somewhere without a display, e.g. a remote server)
+PYTHONPATH=. streamlit run simulator/ui/app.py --server.port 8080 --server.address 0.0.0.0 --server.headless true
+```
+
