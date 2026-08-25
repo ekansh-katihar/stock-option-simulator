@@ -29,7 +29,13 @@ import streamlit as st
 import plotly.graph_objects as go
 
 import uuid
+import sys
+from pathlib import Path
 
+# Add project root to sys.path so 'simulator' can be imported on Streamlit Cloud
+project_root = str(Path(__file__).resolve().parents[2])
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 from simulator.data.price_history import fetch_price_history
 from simulator.data.option_pricer import BlackScholesSource
 from simulator.data.corporate_events import (
