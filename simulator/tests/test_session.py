@@ -52,6 +52,21 @@ class TestOpenAndSnapshot(unittest.TestCase):
         self.assertGreater(len(candidates), 0)
         self.assertLessEqual(len(candidates), 5)
 
+    def test_view_chain_reaches_far_dated_contracts_without_limit(self):
+        # Regression: previously, sorting by (expiry, strike) then truncating
+        # to `limit` silently dropped everything past the first couple of
+        # expiries. With limit=None, a 300-400 day window must return results.
+        candidates = self.session.view_chain(min_expiry_days=300, max_expiry_days=400)
+        self.assertGreater(len(candidates), 0)
+
+    def test_view_chain_filters_by_delta_and_strike(self):
+        candidates = self.session.view_chain(min_delta=0.4, max_delta=0.6,
+                                              min_strike=150, max_strike=220)
+        self.assertGreater(len(candidates), 0)
+        for c in candidates:
+            self.assertTrue(0.4 <= c["delta"] <= 0.6)
+            self.assertTrue(150 <= c["strike"] <= 220)
+
 
 class TestAdvanceAndSettlement(unittest.TestCase):
 

@@ -50,17 +50,11 @@ SESSION_ID = st.session_state.session_id
 
 def _build_store():
     """Postgres (Supabase/Neon/etc.) if configured via st.secrets, else
-    in-memory only -- lets local dev work without a database set up.
-    Falls back to in-memory (with a warning) if Postgres is configured but
-    unreachable, rather than breaking the whole app at startup."""
+    in-memory only -- lets local dev work without a database set up."""
     conn_string = st.secrets.get("postgres_connection_string") if hasattr(st, "secrets") else None
     if conn_string:
-        try:
-            from simulator.storage.postgres_session_store import PostgresSessionStore
-            return PostgresSessionStore(conn_string)
-        except Exception as e:
-            st.warning(f"Couldn't connect to Postgres, using in-memory storage this session "
-                       f"(no persistence across restarts): {e}")
+        from simulator.storage.postgres_session_store import PostgresSessionStore
+        return PostgresSessionStore(conn_string)
     return InMemorySessionStore()
 
 
@@ -74,25 +68,13 @@ if "starting_cash" not in st.session_state:
 store = st.session_state.store
 
 
-def _persist(session):
-    """Best-effort write to the store. Never blocks the UI on failure --
-    if Postgres is slow/unreachable, you keep working locally this session,
-    you just won't have a durable backup until it recovers."""
-    try:
-        store.create(SESSION_ID, session)
-    except Exception as e:
-        st.warning(f"Couldn't save to persistent storage (continuing locally): {e}")
-
-
 def _record_equity():
-    """Called after every mutating action: persists (best-effort) and logs
-    the equity point for the chart. Reads the LIVE cached session object,
-    not a fresh store.get() -- see the note above _build_store for why
-    re-fetching from Postgres on every rerun was the actual root cause of
-    interactions silently hanging."""
-    session = st.session_state.get("live_session")
+    """Called after every mutating action. Also persists the session --
+    with PostgresSessionStore this is a real save; with InMemorySessionStore
+    it's a cheap no-op-ish dict reassignment, safe to call every time."""
+    session = store.get(SESSION_ID)
     if session is not None:
-        _persist(session)
+        store.create(SESSION_ID, session)
         snap = session.snapshot()
         st.session_state.equity_log.append({"date": snap["date"], "total_equity": snap["total_equity"]})
 
@@ -303,10 +285,9 @@ with st.sidebar:
                     portfolio=Portfolio(starting_cash=starting_cash_input),
                     start_date=trading_start,
                 )
-                st.session_state.live_session = session
+                store.create(SESSION_ID, session)
                 st.session_state.equity_log = []
                 st.session_state.starting_cash = starting_cash_input
-                _persist(session)
                 _record_equity()
         except ValueError as e:
             st.error(f"Couldn't start session: {e}")
@@ -315,7 +296,7 @@ with st.sidebar:
         else:
             st.rerun()
 
-session: TradingSession | None = st.session_state.get("live_session")
+session: TradingSession | None = store.get(SESSION_ID)
 
 if session is None:
     st.info("Start a session from the sidebar to begin.")

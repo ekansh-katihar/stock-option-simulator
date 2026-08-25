@@ -235,6 +235,41 @@ class QCContractAdapter(OptionDataSource):
 # Source-agnostic contract selector
 # ---------------------------------------------------------------------------
 
+def filter_contracts(
+    contracts: list,
+    *,
+    right: OptionRight | None = None,
+    min_strike: float | None = None,
+    max_strike: float | None = None,
+    min_delta: float | None = None,
+    max_delta: float | None = None,
+    min_expiry_days: int | None = None,
+    max_expiry_days: int | None = None,
+) -> list:
+    """
+    Returns ALL contracts matching every given bound (inclusive) -- never
+    truncates. Unlike find_contract (which picks the single closest match
+    to a target), this is for browsing/paginating a full range of
+    candidates. Callers are responsible for any display-level pagination.
+    """
+    result = list(contracts)
+    if right is not None:
+        result = [c for c in result if c.right == right]
+    if min_strike is not None:
+        result = [c for c in result if c.strike >= min_strike]
+    if max_strike is not None:
+        result = [c for c in result if c.strike <= max_strike]
+    if min_delta is not None:
+        result = [c for c in result if c.delta >= min_delta]
+    if max_delta is not None:
+        result = [c for c in result if c.delta <= max_delta]
+    if min_expiry_days is not None:
+        result = [c for c in result if c.days_to_expiry >= min_expiry_days]
+    if max_expiry_days is not None:
+        result = [c for c in result if c.days_to_expiry <= max_expiry_days]
+    return result
+
+
 def find_contract(
     contracts: list,
     *,
