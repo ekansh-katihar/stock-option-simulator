@@ -10,6 +10,16 @@ Source-agnostic option data layer.
 - QCContractAdapter: Phase 2 stub -- will wrap QuantConnect's real historical
   option chain data. Same interface, so swapping is a one-line change.
 - find_contract: source-agnostic contract selector (by delta or strike).
+- filter_contracts: source-agnostic multi-bound filter (delta/strike/expiry/
+  liquidity/iv_rank), used for range-based selection.
+
+MOCK DATA NOTE: BlackScholesSource has no real market to pull open_interest,
+volume, or true implied-vol-rank history from. Fields below marked "MOCK"
+are heuristic placeholders so that liquidity/IV-rank config filters have
+something meaningful to act on today. Replace them once a real data source
+(e.g. QCContractAdapter, or a paid chain-data provider) is wired in -- no
+other code should need to change, since they live behind the same
+OptionContract/OptionDataSource interface.
 """
 
 from __future__ import annotations
@@ -47,6 +57,11 @@ class OptionContract:
     underlying_price: float
     snapshot_date: date
 
+    # --- MOCK fields (see module docstring) ---
+    open_interest: int = 0     # MOCK -- synthetic liquidity proxy
+    volume: int = 0            # MOCK -- synthetic liquidity proxy
+    iv_rank: float = 0.5       # MOCK -- realized-vol percentile, proxy for true IV rank
+
     @property
     def mid(self) -> float:
         return (self.bid + self.ask) / 2
@@ -54,6 +69,11 @@ class OptionContract:
     @property
     def days_to_expiry(self) -> int:
         return (self.expiry - self.snapshot_date).days
+
+    @property
+    def spread_pct(self) -> float:
+        """(ask - bid) / mid, as a fraction. 0.0 if mid is 0 to avoid a division error."""
+        return (self.ask - self.bid) / self.mid if self.mid > 0 else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +166,7 @@ class BlackScholesSource(OptionDataSource):
         self.risk_free_rate = risk_free_rate
         self.strike_pct_range = strike_pct_range
         self.strike_step_pct = strike_step_pct
-        self.expiries_days = expiries_days or [7, 14, 21, 30, 45, 60, 90, 180, 365]
+        self.expiries_days = expiries_days or [7, 14, 21, 30, 45, 60, 90, 180, 365, 545, 730]
         self.vol_lookback_days = vol_lookback_days
 
     def _realized_vol(self, as_of: date) -> float:
@@ -171,8 +191,51 @@ class BlackScholesSource(OptionDataSource):
         annualized = math.sqrt(variance) * math.sqrt(252)
         return max(annualized, 0.05)  # floor: real stocks are never ~0% vol
 
+    def _iv_rank(self, as_of: date, current_vol: float, lookback_days: int = 252, sample_every: int = 5) -> float:
+        """
+        MOCK IV rank. There is no real implied-vol history behind a synthetic
+        chain, so this approximates "IV rank" as the percentile of today's
+        realized volatility against a trailing distribution of realized
+        volatility -- sampled every `sample_every` days to keep this cheap
+        over a year-long lookback. Replace with true IV rank (computed from
+        real chain history) once a real data source is wired in.
+        """
+        dates = sorted(d for d in self.price_history if d <= as_of)
+        if len(dates) < 30:
+            return 0.5  # not enough history to rank meaningfully -- assume mid-range
+
+        window_dates = dates[-lookback_days:]
+        sample_dates = window_dates[::sample_every] or window_dates
+
+        historical_vols = [self._realized_vol(d) for d in sample_dates]
+        below_or_equal = sum(1 for v in historical_vols if v <= current_vol)
+        return below_or_equal / len(historical_vols)
+
+    def _mock_liquidity(self, strike: float, spot_price: float, days_to_expiry: int) -> tuple[int, int]:
+        """
+        MOCK liquidity heuristic. No real open interest/volume exists for a
+        synthetic chain -- this approximates the real-world pattern (higher
+        OI/volume near-the-money and near-term, tapering off further out and
+        further out in time) so liquidity filters in config have something
+        meaningful to act on. Replace once a real data source is wired in.
+        """
+        moneyness_distance = abs(strike - spot_price) / spot_price if spot_price > 0 else 1.0
+        moneyness_factor = max(0.0, 1 - moneyness_distance / self.strike_pct_range)
+
+        # Near-term contracts (weeklies/monthlies) trade far more than LEAPS.
+        tenor_factor = max(0.1, 1 - days_to_expiry / 730)
+
+        base_open_interest = 5000
+        base_volume = 500
+
+        open_interest = int(base_open_interest * moneyness_factor * tenor_factor)
+        volume = int(base_volume * moneyness_factor * tenor_factor)
+        return open_interest, volume
+
     def get_chain(self, underlying: str, snapshot_date: date, spot_price: float) -> list[OptionContract]:
         sigma = self._realized_vol(snapshot_date)
+        iv_rank = self._iv_rank(snapshot_date, sigma)  # MOCK -- same value across the whole chain, see docstring
+
         contracts = []
         num_steps = int(self.strike_pct_range / self.strike_step_pct)
 
@@ -184,6 +247,7 @@ class BlackScholesSource(OptionDataSource):
             for days_out in self.expiries_days:
                 expiry = snapshot_date + timedelta(days=days_out)
                 T = days_out / 365.0
+                open_interest, volume = self._mock_liquidity(strike, spot_price, days_out)
 
                 for right in (OptionRight.CALL, OptionRight.PUT):
                     price = black_scholes_price(spot_price, strike, T, self.risk_free_rate, sigma, right)
@@ -204,6 +268,9 @@ class BlackScholesSource(OptionDataSource):
                         vega=greeks["vega"],
                         underlying_price=spot_price,
                         snapshot_date=snapshot_date,
+                        open_interest=open_interest,
+                        volume=volume,
+                        iv_rank=iv_rank,
                     ))
 
         return contracts
@@ -218,7 +285,9 @@ class QCContractAdapter(OptionDataSource):
     Will wrap QuantConnect's real historical option chain data, converting
     c.bid_price / c.greeks.delta / etc. into OptionContract instances.
     Same interface as BlackScholesSource, so swapping in is a one-line change
-    wherever the data source is constructed.
+    wherever the data source is constructed. Once real data is available,
+    open_interest/volume/iv_rank should come from the real chain instead of
+    the MOCK heuristics in BlackScholesSource above.
     """
 
     def __init__(self, qc_algorithm_or_qb):
@@ -245,12 +314,16 @@ def filter_contracts(
     max_delta: float | None = None,
     min_expiry_days: int | None = None,
     max_expiry_days: int | None = None,
+    min_open_interest: int | None = None,
+    max_spread_pct: float | None = None,
+    min_iv_rank: float | None = None,
 ) -> list:
     """
     Returns ALL contracts matching every given bound (inclusive) -- never
     truncates. Unlike find_contract (which picks the single closest match
     to a target), this is for browsing/paginating a full range of
-    candidates. Callers are responsible for any display-level pagination.
+    candidates, or for range-based selection (e.g. delta_range from config).
+    Callers are responsible for any display-level pagination.
     """
     result = list(contracts)
     if right is not None:
@@ -267,6 +340,12 @@ def filter_contracts(
         result = [c for c in result if c.days_to_expiry >= min_expiry_days]
     if max_expiry_days is not None:
         result = [c for c in result if c.days_to_expiry <= max_expiry_days]
+    if min_open_interest is not None:
+        result = [c for c in result if c.open_interest >= min_open_interest]
+    if max_spread_pct is not None:
+        result = [c for c in result if c.spread_pct <= max_spread_pct]
+    if min_iv_rank is not None:
+        result = [c for c in result if c.iv_rank >= min_iv_rank]
     return result
 
 
@@ -278,10 +357,12 @@ def find_contract(
     target_strike: float | None = None,
     max_expiry_days: int | None = None,
     min_expiry_days: int | None = None,
+    min_open_interest: int | None = None,
+    max_spread_pct: float | None = None,
 ):
     """
-    Filters by right/expiry window, then returns the closest match to
-    target_delta or target_strike (whichever is given). None if nothing matches.
+    Filters by right/expiry window/liquidity, then returns the closest match
+    to target_delta or target_strike (whichever is given). None if nothing matches.
     """
     candidates = list(contracts)
 
@@ -291,6 +372,10 @@ def find_contract(
         candidates = [c for c in candidates if c.days_to_expiry <= max_expiry_days]
     if min_expiry_days is not None:
         candidates = [c for c in candidates if c.days_to_expiry >= min_expiry_days]
+    if min_open_interest is not None:
+        candidates = [c for c in candidates if c.open_interest >= min_open_interest]
+    if max_spread_pct is not None:
+        candidates = [c for c in candidates if c.spread_pct <= max_spread_pct]
 
     if not candidates:
         return None

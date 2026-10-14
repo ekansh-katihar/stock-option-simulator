@@ -16,17 +16,22 @@ simulator/
     price_history.py      # Real stock price fetch via yfinance
   engine/
     portfolio.py           # Leg dataclass, Portfolio (cash/P&L bookkeeping)
-    strategies/pmcc.py      # PMCCStrategy (decision logic) -- note: actually at simulator/strategies/pmcc.py
     simulator.py             # BacktestEngine (fully automated day-by-day loop)
     session.py                # TradingSession (interactive/manual control, primitives only)
   strategies/
+    base_strategy.py
+    blackout.py                # Blackout window handling
+    iron_condor.py             # Iron Condor strategy (stub/WIP)
     pmcc.py                    # PMCCStrategy + PMCCConfig + RollResult
+    reverse_iron_condor.py     # Reverse Iron Condor strategy (stub/WIP)
+    rule_config.py
+    short_leg_selector.py      # Selector logic for short legs
   storage/
     session_store.py            # SessionStore interface + InMemorySessionStore
   ui/
     app.py                       # Streamlit dashboard, wraps TradingSession directly
   run_backtest.py                 # CLI entry point for the fully-automated backtest
-  tests/                           # unittest suite, one file per module, 61 tests total
+  tests/                           # unittest suite, one file per module
 requirements.txt                   # yfinance, pandas, streamlit, plotly
 ```
 
