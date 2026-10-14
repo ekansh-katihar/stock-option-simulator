@@ -1,0 +1,118 @@
+# ============================================================
+# PMCC (Poor Man's Covered Call) Strategy Backtest Configuration
+# ------------------------------------------------------------
+# Every rule block (and many individual rules) carries an
+# "active" flag. When active: false, the program should treat
+# that rule as always-passing / skipped, NOT as an error.
+# This lets you turn individual guardrails on/off per backtest
+# run without deleting or restructuring the file.
+# ============================================================
+
+underlying:
+  active: true                        # master switch for this whole simulation run
+  tickers: ["SPY"]                    # list of underlyings to simulate
+  simulation_start_date: "2024-01-01"
+  simulation_end_date: "2024-12-31"
+
+# ------------------------------------------------------------
+# LONG LEG (the "LEAPS" - deep ITM, long-dated call you buy once
+# and hold, financed over time by repeated short-leg premium)
+# ------------------------------------------------------------
+long_leg:
+  active: true                        # if false, skip opening any long leg (useful for isolating short-leg-only tests)
+  delta_range: [0.80, 0.90]           # acceptable delta band; pick the chain strike whose delta falls closest within this range
+  expiry_range_days: [365, 450]       # acceptable days-to-expiry band when selecting the long leg
+  liquidity:
+    active: true                      # toggle liquidity filtering on/off for the long leg
+    min_open_interest: 100            # minimum open interest required to consider a strike tradeable
+    max_bid_ask_spread_pct: 0.10      # max allowed (ask - bid) / mid, as a fraction; wider spreads are rejected
+
+# ------------------------------------------------------------
+# SHORT LEG - ENTRY (the weekly/bi-weekly call you sell against
+# the long leg to collect premium)
+# ------------------------------------------------------------
+short_leg_entry:
+  active: true
+  delta_range: [0.15, 0.40]           # acceptable delta band for selling the short leg
+  expiry_range_days: [30, 45]         # days-to-expiry window when selling the short leg
+  min_iv_rank:
+    active: false                     # turn on to require elevated IV before selling (better premium-selling edge)
+    threshold: 0.30                   # e.g. only sell if IV rank/percentile >= 30%
+  liquidity:
+    active: true
+    min_open_interest: 50
+    max_bid_ask_spread_pct: 0.15
+
+# ------------------------------------------------------------
+# SHORT LEG - EXIT (rules for closing/rolling the short leg
+# before or at its own expiry)
+# ------------------------------------------------------------
+short_leg_exit:
+  active: true                        # master switch for all short-leg exit logic below
+
+  delta_threshold:
+    active: false                     # close/roll if the short leg's current delta rises above this value
+    value: 0.65                       # rising delta = rising probability of finishing ITM / assignment risk
+
+  days_before_expiry:
+    active: false                     # close/roll once this many days remain, REGARDLESS of price or delta
+    value: 21                         # the "21 DTE rule" - sidesteps gamma risk that accelerates near expiry
+
+  profit_target_pct:
+    active: false                     # close early once this fraction of max possible premium has been captured
+    value: 0.80                       # e.g. 0.50 = close once you've kept 50% of the premium originally collected
+
+  stop_loss:
+    active: true
+    base_multiplier: 1.0
+
+  price_buffer:
+    active: false                     # the "how close is too close to the strike" rule
+    exit_use_expected_move: true      # true = compute buffer dynamically as strike * IV * sqrt(days/365)
+                                      # false = use the flat percentage below instead
+    flat_buffer_pct: 0.02             # only used when exit_use_expected_move is false
+
+  dividend_risk:
+    active: true                      # independent override rule, evaluated in addition to the above
+    avoid_assignment_near_dividend: true   # if true, force close/roll on an ITM short leg ahead of ex-dividend date
+    dividend_buffer_days: 3           # how many days before ex-div this override kicks in
+
+# ------------------------------------------------------------
+# BLACKOUT PERIODS - no short leg may expire inside these windows
+# ------------------------------------------------------------
+blackout_periods:
+  active: true                        # master switch for all blackout logic
+
+  earnings:
+    active: true                      # auto-derive blackout windows around each ticker's earnings date
+    buffer_before_days: 7
+    buffer_after_days: 7
+
+  custom_dates:
+    active: true                      # explicit list of blackout ranges (competitor events, conferences, etc.)
+    ranges:
+      - {start: "2024-03-01", end: "2024-03-10"}
+      - {start: "2024-09-15", end: "2024-09-22"}
+      # add as many {start, end} entries as needed
+
+# ------------------------------------------------------------
+# STRIKE SAFETY CHECK (replaces the old enforce_short_strike_floor
+# boolean - now just set strike_safety.active to false to disable)
+# ------------------------------------------------------------
+strike_safety:
+  active: true
+
+# ------------------------------------------------------------
+# EXECUTION COSTS / SIZING
+# ------------------------------------------------------------
+execution:
+  active: true
+  commission_per_contract: 0.0
+  slippage_pct_of_mid: 0.0
+  contracts_per_position: 1
+
+# ------------------------------------------------------------
+# ROLL SETTINGS
+# ------------------------------------------------------------
+roll_settings:
+  mode: "roll_if_possible_else_wait"  # "roll_if_possible_else_wait" | "always_roll" | "always_close_reopen"

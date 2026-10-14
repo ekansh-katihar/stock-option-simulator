@@ -311,13 +311,22 @@ class TradingSession:
     # shape/size as the OptionDataSource's own input, so the store persists
     # it separately (see PostgresSessionStore) rather than duplicating it
     # inside this dict.
+    #
+    # `config` is now routed through _encode_dates/_decode_dates just like
+    # `log` is. This matters because PMCCConfig.custom_blackout_ranges holds
+    # list[tuple[date, date]] -- dataclasses.asdict() does NOT turn those
+    # date objects into JSON-safe strings, it just deep-copies them as-is.
+    # Without this, json.dumps() in PostgresSessionStore.create() would
+    # raise (or, worse, some other json encoder further downstream could
+    # silently mis-serialize them). _encode_dates/_decode_dates now handle
+    # tuples in addition to dicts/lists so this round-trips safely.
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
         return {
             "underlying": self._underlying,
             "current_date": self._current_date.isoformat(),
-            "config": asdict(self._config),
+            "config": _encode_dates(asdict(self._config)),
             "log": _encode_dates(self._log),
             "portfolio": self._portfolio.to_dict(),
             "long_leg_id": self._long_leg.id if self._long_leg else None,
@@ -333,7 +342,7 @@ class TradingSession:
             price_history=price_history,
             portfolio=portfolio,
             start_date=date.fromisoformat(data["current_date"]),
-            config=PMCCConfig(**data["config"]),
+            config=PMCCConfig(**_decode_dates(data["config"])),
         )
         session._log = _decode_dates(data["log"])
 
@@ -344,9 +353,16 @@ class TradingSession:
 
 
 def _encode_dates(obj):
-    """Recursively convert date objects to a JSON-safe marker form."""
+    """
+    Recursively convert date objects to a JSON-safe marker form, and tuples
+    to a JSON-safe marker form too (plain JSON has no tuple type, and a bare
+    tuple of dates would otherwise pass through untouched -- see the
+    to_dict docstring above for why this matters for PMCCConfig).
+    """
     if isinstance(obj, date):
         return {"__date__": obj.isoformat()}
+    if isinstance(obj, tuple):
+        return {"__tuple__": [_encode_dates(v) for v in obj]}
     if isinstance(obj, dict):
         return {k: _encode_dates(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -359,6 +375,8 @@ def _decode_dates(obj):
     if isinstance(obj, dict):
         if set(obj.keys()) == {"__date__"}:
             return date.fromisoformat(obj["__date__"])
+        if set(obj.keys()) == {"__tuple__"}:
+            return tuple(_decode_dates(v) for v in obj["__tuple__"])
         return {k: _decode_dates(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_decode_dates(v) for v in obj]
