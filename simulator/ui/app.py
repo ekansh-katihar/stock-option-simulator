@@ -26,6 +26,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 import plotly.graph_objects as go
 
 import uuid
@@ -45,7 +46,7 @@ from simulator.engine.portfolio import Portfolio
 from simulator.engine.session import TradingSession
 from simulator.storage.session_store import InMemorySessionStore
 
-st.set_page_config(page_title="PMCC Simulator", layout="wide")
+st.set_page_config(page_title="Options Simulator", layout="wide")
 
 # Unique per browser session -- without this, every visitor would share the
 # exact same TradingSession, stepping on each other's trades.
@@ -59,7 +60,10 @@ def _build_store():
     in-memory only -- lets local dev work without a database set up.
     Falls back to in-memory (with a warning) if Postgres is configured but
     unreachable, rather than breaking the whole app at startup."""
-    conn_string = st.secrets.get("postgres_connection_string") if hasattr(st, "secrets") else None
+    try:
+        conn_string = st.secrets.get("postgres_connection_string")
+    except StreamlitSecretNotFoundError:
+        conn_string = None
     if conn_string:
         try:
             from simulator.storage.postgres_session_store import PostgresSessionStore
@@ -78,6 +82,12 @@ if "starting_cash" not in st.session_state:
     st.session_state.starting_cash = 100_000
 
 store = st.session_state.store
+
+strategy_mode = st.sidebar.selectbox("Strategy", ["Iron Condor", "PMCC"], key="strategy_mode")
+if strategy_mode == "Iron Condor":
+    from simulator.ui.condor import render
+    render(store, SESSION_ID)
+    st.stop()
 
 
 def _persist(session):
@@ -413,8 +423,8 @@ cols[3].metric(
 )
 cols[4].metric(
     "Total equity", f"${snap['total_equity']:,.2f}", delta=f"{return_pct:.2f}%",
-    help="Cash + Unrealized P&L. What you'd walk away with if you closed "
-         "everything right now. The % is versus your starting cash."
+    help="Cash + signed closing value of open positions: longs at bid, shorts at ask. "
+         "The % is versus your starting cash; execution uses bid/ask."
 )
 cols[5].metric(
     "Breakeven (combined)", f"${breakeven:,.2f}" if breakeven else "\u2014",

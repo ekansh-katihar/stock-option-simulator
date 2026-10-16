@@ -88,6 +88,12 @@ class OptionDataSource(ABC):
         """Return all available contracts for `underlying` as of `snapshot_date`."""
         raise NotImplementedError
 
+    def get_quote(self, underlying: str, snapshot_date: date, spot_price: float,
+                  right: OptionRight, strike: float, expiry: date) -> OptionContract | None:
+        """Exact contract lookup. Never substitute a nearby strike or expiry."""
+        return next((c for c in self.get_chain(underlying, snapshot_date, spot_price)
+                     if c.right == right and c.strike == strike and c.expiry == expiry), None)
+
 
 # ---------------------------------------------------------------------------
 # Black-Scholes math (pure functions, no data dependency)
@@ -148,8 +154,9 @@ class BlackScholesSource(OptionDataSource):
                        estimate realized volatility.
     risk_free_rate:    annualized, e.g. 0.045 for 4.5%.
     strike_pct_range:  how far above/below spot to generate strikes (0.30 = +/-30%).
-    strike_step_pct:   spacing between strikes as % of spot (0.025 = 2.5%).
-    expiries_days:     day-offsets from snapshot_date to generate expiries for.
+    strike_step_pct:   fixed dollar spacing derived from the first historical spot.
+    expiries_days:     maximum value is the catalogue horizon; Friday weekly/monthly
+                       expiries are generated within that horizon.
     vol_lookback_days: window for realized volatility calculation.
     """
 
@@ -162,12 +169,18 @@ class BlackScholesSource(OptionDataSource):
         expiries_days: list | None = None,
         vol_lookback_days: int = 30,
     ):
+        if not price_history or strike_step_pct <= 0 or strike_pct_range <= 0:
+            raise ValueError("Provide price history and positive strike-grid settings.")
         self.price_history = price_history
         self.risk_free_rate = risk_free_rate
         self.strike_pct_range = strike_pct_range
         self.strike_step_pct = strike_step_pct
         self.expiries_days = expiries_days or [7, 14, 21, 30, 45, 60, 90, 180, 365, 545, 730]
         self.vol_lookback_days = vol_lookback_days
+        # Fixed dollar grid, anchored to the first observed price (no future data).
+        anchor = price_history[min(price_history)]
+        self.strike_step = max(0.5, round(anchor * strike_step_pct * 2) / 2)
+        self._inputs_cache = {}
 
     def _realized_vol(self, as_of: date) -> float:
         """Annualized realized volatility from trailing daily log returns."""
@@ -232,48 +245,48 @@ class BlackScholesSource(OptionDataSource):
         volume = int(base_volume * moneyness_factor * tenor_factor)
         return open_interest, volume
 
+    def _inputs(self, snapshot_date: date) -> tuple[float, float]:
+        if snapshot_date not in self._inputs_cache:
+            sigma = self._realized_vol(snapshot_date)
+            self._inputs_cache[snapshot_date] = (sigma, self._iv_rank(snapshot_date, sigma))
+        return self._inputs_cache[snapshot_date]
+
+    def get_quote(self, underlying: str, snapshot_date: date, spot_price: float,
+                  right: OptionRight, strike: float, expiry: date) -> OptionContract:
+        """Reprice the original contract even outside today's displayed chain."""
+        sigma, iv_rank = self._inputs(snapshot_date)
+        days_out = max(0, (expiry - snapshot_date).days)
+        T = days_out / 365.0
+        price = black_scholes_price(spot_price, strike, T, self.risk_free_rate, sigma, right)
+        greeks = black_scholes_greeks(spot_price, strike, T, self.risk_free_rate, sigma, right)
+        spread = max(0.01, price * 0.02) if days_out else 0.0
+        oi, volume = self._mock_liquidity(strike, spot_price, days_out)
+        return OptionContract(
+            strike=strike, expiry=expiry, right=right,
+            bid=round(max(0.0, price - spread / 2), 2),
+            ask=round(price + spread / 2, 2), last=round(price, 2),
+            iv=sigma, underlying_price=spot_price, snapshot_date=snapshot_date,
+            open_interest=oi, volume=volume, iv_rank=iv_rank, **greeks,
+        )
+
     def get_chain(self, underlying: str, snapshot_date: date, spot_price: float) -> list[OptionContract]:
-        sigma = self._realized_vol(snapshot_date)
-        iv_rank = self._iv_rank(snapshot_date, sigma)  # MOCK -- same value across the whole chain, see docstring
-
-        contracts = []
-        num_steps = int(self.strike_pct_range / self.strike_step_pct)
-
-        for i in range(-num_steps, num_steps + 1):
-            strike = round(spot_price * (1 + i * self.strike_step_pct), 2)
-            if strike <= 0:
-                continue
-
-            for days_out in self.expiries_days:
-                expiry = snapshot_date + timedelta(days=days_out)
-                T = days_out / 365.0
-                open_interest, volume = self._mock_liquidity(strike, spot_price, days_out)
-
-                for right in (OptionRight.CALL, OptionRight.PUT):
-                    price = black_scholes_price(spot_price, strike, T, self.risk_free_rate, sigma, right)
-                    greeks = black_scholes_greeks(spot_price, strike, T, self.risk_free_rate, sigma, right)
-
-                    spread = max(0.01, price * 0.02)  # synthetic bid/ask spread
-                    contracts.append(OptionContract(
-                        strike=strike,
-                        expiry=expiry,
-                        right=right,
-                        bid=round(max(0.0, price - spread / 2), 2),
-                        ask=round(price + spread / 2, 2),
-                        last=round(price, 2),
-                        iv=sigma,
-                        delta=greeks["delta"],
-                        gamma=greeks["gamma"],
-                        theta=greeks["theta"],
-                        vega=greeks["vega"],
-                        underlying_price=spot_price,
-                        snapshot_date=snapshot_date,
-                        open_interest=open_interest,
-                        volume=volume,
-                        iv_rank=iv_rank,
-                    ))
-
-        return contracts
+        # Synthetic weekly Fridays for 90 days, then monthly third Fridays.
+        # These are fixed calendar dates, not moving day-offset expiries.
+        # This is a model catalogue, not a claim of actual historical listings.
+        expiries = []
+        friday = snapshot_date + timedelta(days=(4 - snapshot_date.weekday()) % 7)
+        horizon = max(self.expiries_days)
+        while (friday - snapshot_date).days <= horizon:
+            dte = (friday - snapshot_date).days
+            if dte > 0 and (dte <= 90 or 15 <= friday.day <= 21):
+                expiries.append(friday)
+            friday += timedelta(days=7)
+        low = max(1, math.ceil(spot_price * (1 - self.strike_pct_range) / self.strike_step))
+        high = math.floor(spot_price * (1 + self.strike_pct_range) / self.strike_step)
+        return [self.get_quote(underlying, snapshot_date, spot_price, right,
+                               round(i * self.strike_step, 2), expiry)
+                for i in range(low, high + 1)
+                for expiry in expiries for right in (OptionRight.CALL, OptionRight.PUT)]
 
 
 # ---------------------------------------------------------------------------

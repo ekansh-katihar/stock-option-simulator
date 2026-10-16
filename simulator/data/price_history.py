@@ -23,6 +23,7 @@ def fetch_price_history(ticker: str, start: date, end: date) -> dict:
         start=start.isoformat(),
         end=(end + timedelta(days=1)).isoformat(),
         progress=False,
+        auto_adjust=False,  # Raw closes match option strikes; dividend-adjusted prices do not.
     )
     if df.empty:
         raise ValueError(f"No price data returned for {ticker} between {start} and {end}.")

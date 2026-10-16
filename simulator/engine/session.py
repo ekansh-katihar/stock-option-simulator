@@ -102,7 +102,8 @@ class TradingSession:
             "entry_date": leg.entry_date,
             "entry_price": leg.entry_price,
             "status": leg.status.value,
-            "current_price": contract.mid if contract else None,
+            "current_price": (contract.bid if leg.action == LegAction.BUY else contract.ask)
+                             if contract else None,
             "delta": contract.delta if contract else None,
             "gamma": contract.gamma if contract else None,
             "theta": contract.theta if contract else None,
@@ -230,7 +231,7 @@ class TradingSession:
         if self._long_leg is None:
             raise ValueError("No long leg is currently open.")
 
-        price = self._portfolio.current_market_price(
+        price = self._portfolio.close_market_price(
             self._long_leg, self._current_date, self._data_source, self._underlying, self.spot_price
         )
         if price is None:
@@ -279,7 +280,7 @@ class TradingSession:
         if self._short_leg is None:
             raise ValueError("No short leg is currently open.")
 
-        price = self._portfolio.current_market_price(
+        price = self._portfolio.close_market_price(
             self._short_leg, self._current_date, self._data_source, self._underlying, self.spot_price
         )
         if price is None:
@@ -335,6 +336,9 @@ class TradingSession:
 
     @classmethod
     def from_dict(cls, data: dict, data_source: OptionDataSource, price_history: dict) -> "TradingSession":
+        if data.get("session_type") == "multi_leg":
+            from simulator.engine.multi_leg_session import MultiLegSession
+            return MultiLegSession.from_dict(data, data_source, price_history)
         portfolio = Portfolio.from_dict(data["portfolio"])
         session = cls(
             underlying=data["underlying"],

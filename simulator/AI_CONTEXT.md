@@ -1,5 +1,15 @@
 # PMCC Options Strategy Simulator — Project Summary
 
+> Historical handoff snapshot. See `README.md` for the current workflow.
+> The app now also supports manual Iron Condor sessions via `MultiLegSession`
+> and `ui/condor.py`: four exact contracts, daily replay, closes, position rolls,
+> individual replacements, fees and persistent serialization. `iron_condor.py`
+> supplies construction validation and expiry risk. Pricing now uses fixed
+> strike grids/calendar expiries and exact-contract `get_quote`; equity
+> is cash plus signed closing value (longs at bid, shorts at ask), with bid/ask execution.
+> Unrealized P&L uses those same closing prices. Reverse condor and
+> historical option quotes remain future additions. Existing PMCC remains available.
+
 **Purpose:** Backtest and interactively simulate options strategies (starting with Poor Man's Covered Call), initially fully-automated, now with a manual/interactive mode and a Streamlit UI on top. Long-term goal: swap manual decision points for an LLM agent (Phase 2, not started).
 
 **Status as of this handoff:** Core simulation engine (data → portfolio → strategy → engine → interactive session → UI) is built and unit-tested (61 tests passing). UI is functional but only partially validated interactively — see Known Issues.

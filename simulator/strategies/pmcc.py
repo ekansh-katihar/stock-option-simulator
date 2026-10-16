@@ -189,7 +189,7 @@ class PMCCStrategy:
         if self._long_leg is None:
             raise ValueError("No long call is currently open.")
 
-        price = self._portfolio.current_market_price(
+        price = self._portfolio.close_market_price(
             self._long_leg, current_date, self._data_source, self._underlying, spot_price
         )
         if price is None:
@@ -211,7 +211,7 @@ class PMCCStrategy:
         if self._short_leg is None:
             raise ValueError("No short call is currently open.")
 
-        price = self._portfolio.current_market_price(
+        price = self._portfolio.close_market_price(
             self._short_leg, current_date, self._data_source, self._underlying, spot_price
         )
         if price is None:
@@ -308,7 +308,7 @@ class PMCCStrategy:
         # 4. Profit target -- close once enough of max premium has been captured.
         if self._config.exit_profit_target_pct is not None and contract is not None:
             max_premium = self._short_leg.entry_price
-            captured_pct = (max_premium - contract.mid) / max_premium if max_premium > 0 else 0.0
+            captured_pct = (max_premium - contract.ask) / max_premium if max_premium > 0 else 0.0
             if captured_pct >= self._config.exit_profit_target_pct:
                 return True, "profit_target"
 
@@ -320,7 +320,7 @@ class PMCCStrategy:
             threshold = self._short_leg.entry_price * (
                 1 + self._config.exit_stop_loss_base_multiplier * math.sqrt(max(days_remaining, 0) / max_dte)
             )
-            if contract.mid >= threshold:
+            if contract.ask >= threshold:
                 return True, "stop_loss"
 
         # 5. Price buffer -- "a little bit less than the strike" rule.
@@ -406,7 +406,7 @@ class PMCCStrategy:
             should_close, reason = self.check_short_leg_exit(current_date, spot_price)
 
             if should_close:
-                price = self._portfolio.current_market_price(
+                price = self._portfolio.close_market_price(
                     self._short_leg, current_date, self._data_source, self._underlying, spot_price
                 )
                 if price is None:

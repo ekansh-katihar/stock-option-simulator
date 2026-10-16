@@ -146,7 +146,7 @@ class TestMarkToMarketAndSummary(unittest.TestCase):
 
         self.assertEqual(summary["open_leg_count"], 1)
         self.assertEqual(summary["closed_leg_count"], 0)
-        self.assertAlmostEqual(summary["total_equity"], summary["cash"] + summary["unrealized_pnl"])
+        self.assertAlmostEqual(summary["total_equity"], summary["cash"] + summary["market_value"])
 
 
 if __name__ == "__main__":

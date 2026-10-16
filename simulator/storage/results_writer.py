@@ -143,11 +143,13 @@ def write_daily_snapshots(
             point.cash, point.realized_pnl, point.unrealized_pnl, point.total_equity,
             long_leg.strike if long_leg else None,
             long_leg.expiry if long_leg else None,
-            long_contract.mid if long_contract else None,
+            # Keep legacy *_mid_price column names for schema compatibility;
+            # stored values now use the executable closing side.
+            long_contract.bid if long_contract else None,
             long_contract.delta if long_contract else None,
             short_leg.strike if short_leg else None,
             short_leg.expiry if short_leg else None,
-            short_contract.mid if short_contract else None,
+            short_contract.ask if short_contract else None,
             short_contract.delta if short_contract else None,
             short_days_to_expiry,
             iv, iv_rank,

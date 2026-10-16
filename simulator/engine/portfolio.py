@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 import uuid
+import math
 
 from simulator.data.option_pricer import OptionRight, OptionDataSource
 
@@ -46,6 +47,8 @@ class Leg:
     close_price: float | None = None
     realized_pnl: float | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    entry_fee: float = 0.0
+    exit_fee: float = 0.0
 
     @property
     def is_open(self) -> bool:
@@ -53,6 +56,8 @@ class Leg:
 
     def to_dict(self) -> dict:
         return {
+            "entry_fee": self.entry_fee,
+            "exit_fee": self.exit_fee,
             "id": self.id,
             "right": self.right.value,
             "action": self.action.value,
@@ -70,6 +75,8 @@ class Leg:
     @classmethod
     def from_dict(cls, data: dict) -> "Leg":
         return cls(
+            entry_fee=data.get("entry_fee", 0.0),
+            exit_fee=data.get("exit_fee", 0.0),
             id=data["id"],
             right=OptionRight(data["right"]),
             action=LegAction(data["action"]),
@@ -88,6 +95,9 @@ class Leg:
 class Portfolio:
 
     def __init__(self, starting_cash: float):
+        if not math.isfinite(starting_cash) or starting_cash < 0:
+            raise ValueError("Starting cash must be finite and nonnegative.")
+        self.starting_cash = starting_cash
         self.cash = starting_cash
         self._legs: list[Leg] = []
 
@@ -104,14 +114,20 @@ class Portfolio:
         entry_date: date,
         price: float,
         quantity: int = 1,
+        fee: float = 0.0,
     ) -> Leg:
         """Record a new leg. Buying debits cash, selling credits cash."""
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("Quantity must be a positive integer.")
+        if (not all(math.isfinite(v) for v in (price, fee, strike))
+                or price < 0 or fee < 0 or strike <= 0 or expiry <= entry_date):
+            raise ValueError("Invalid price, strike or expiry for opening a leg.")
         notional = price * CONTRACT_MULTIPLIER * quantity
-        self.cash += -notional if action == LegAction.BUY else notional
+        self.cash += (-notional if action == LegAction.BUY else notional) - fee
 
         leg = Leg(
             right=right, action=action, strike=strike, expiry=expiry,
-            entry_date=entry_date, entry_price=price, quantity=quantity,
+            entry_date=entry_date, entry_price=price, quantity=quantity, entry_fee=fee,
         )
         self._legs.append(leg)
         return leg
@@ -140,14 +156,16 @@ class Portfolio:
         leg.status = LegStatus.CLOSED
         leg.close_date = settlement_date
         leg.close_price = intrinsic
-        leg.realized_pnl = realized_pnl
-        return realized_pnl
+        leg.realized_pnl = realized_pnl - leg.entry_fee
+        return leg.realized_pnl
 
-    def close_leg(self, leg: Leg, close_date: date, close_price: float) -> float:
+    def close_leg(self, leg: Leg, close_date: date, close_price: float, fee: float = 0.0) -> float:
         """Close a leg early at a given market price (not intrinsic). Returns realized P&L."""
         if not leg.is_open:
             raise ValueError("Cannot close a leg that is already closed.")
 
+        if not all(math.isfinite(v) for v in (close_price, fee)) or close_price < 0 or fee < 0:
+            raise ValueError("Close price and fee must be nonnegative.")
         notional_close = close_price * CONTRACT_MULTIPLIER * leg.quantity
         notional_entry = leg.entry_price * CONTRACT_MULTIPLIER * leg.quantity
 
@@ -160,29 +178,41 @@ class Portfolio:
             self.cash -= notional_close
             realized_pnl = notional_entry - notional_close
 
+        self.cash -= fee
+        leg.exit_fee = fee
         leg.status = LegStatus.CLOSED
         leg.close_date = close_date
         leg.close_price = close_price
-        leg.realized_pnl = realized_pnl
-        return realized_pnl
+        leg.realized_pnl = realized_pnl - leg.entry_fee - fee
+        return leg.realized_pnl
 
     # ------------------------------------------------------------------
     # Valuation
     # ------------------------------------------------------------------
 
     def _find_matching_contract(self, leg: Leg, chain: list):
-        """Best-effort match: same right, closest expiry, then closest strike."""
-        candidates = [c for c in chain if c.right == leg.right]
-        if not candidates:
-            return None
-        candidates.sort(key=lambda c: (abs((c.expiry - leg.expiry).days), abs(c.strike - leg.strike)))
-        return candidates[0]
+        return next((c for c in chain if c.right == leg.right
+                     and c.strike == leg.strike and c.expiry == leg.expiry), None)
 
     def find_matching_contract(self, leg: Leg, as_of_date: date,
-                                data_source: OptionDataSource, underlying: str, spot_price: float):
-        """Public lookup: best-effort matching live contract for a leg (full OptionContract, not just price)."""
-        chain = data_source.get_chain(underlying, as_of_date, spot_price)
-        return self._find_matching_contract(leg, chain)
+                               data_source: OptionDataSource, underlying: str, spot_price: float):
+        quote = data_source.get_quote(underlying, as_of_date, spot_price,
+                                      leg.right, leg.strike, leg.expiry)
+        if quote is not None:
+            if (quote.right, quote.strike, quote.expiry, quote.snapshot_date) != (
+                    leg.right, leg.strike, leg.expiry, as_of_date):
+                raise ValueError("Pricing source returned a different contract or quote date.")
+            if (not all(math.isfinite(v) for v in (quote.bid, quote.ask))
+                    or not 0 <= quote.bid <= quote.ask):
+                raise ValueError("Pricing source returned invalid bid/ask prices.")
+        return quote
+
+    def close_market_price(self, leg: Leg, as_of_date: date,
+                           data_source: OptionDataSource, underlying: str, spot_price: float) -> float:
+        quote = self.find_matching_contract(leg, as_of_date, data_source, underlying, spot_price)
+        if quote is None:
+            raise ValueError(f"Missing quote for {leg.right.value} {leg.strike} {leg.expiry}.")
+        return quote.bid if leg.action == LegAction.BUY else quote.ask
 
     def current_market_price(
         self,
@@ -192,9 +222,11 @@ class Portfolio:
         underlying: str,
         spot_price: float,
     ) -> float | None:
-        """Current mid-price for a single leg, or None if no matching contract found."""
+        """Executable closing price: bid for longs, ask for shorts; None if missing."""
         contract = self.find_matching_contract(leg, as_of_date, data_source, underlying, spot_price)
-        return contract.mid if contract is not None else None
+        if contract is None:
+            return None
+        return contract.bid if leg.action == LegAction.BUY else contract.ask
 
     def mark_to_market(
         self,
@@ -203,20 +235,19 @@ class Portfolio:
         underlying: str,
         spot_price: float,
     ) -> float:
-        """Unrealized P&L across all open legs, valued at current market price."""
+        """Unrealized P&L at closing bid/ask, including booked entry fees only."""
         open_legs = self.open_legs()
         if not open_legs:
             return 0.0
 
-        chain = data_source.get_chain(underlying, as_of_date, spot_price)
         total = 0.0
 
         for leg in open_legs:
-            contract = self._find_matching_contract(leg, chain)
+            contract = self.find_matching_contract(leg, as_of_date, data_source, underlying, spot_price)
             if contract is None:
-                continue  # no market data available for this leg right now
+                raise ValueError(f"Missing quote for {leg.right.value} {leg.strike} {leg.expiry}.")
 
-            current_price = contract.mid
+            current_price = contract.bid if leg.action == LegAction.BUY else contract.ask
             notional_current = current_price * CONTRACT_MULTIPLIER * leg.quantity
             notional_entry = leg.entry_price * CONTRACT_MULTIPLIER * leg.quantity
 
@@ -224,6 +255,7 @@ class Portfolio:
                 total += notional_current - notional_entry
             else:
                 total += notional_entry - notional_current
+            total -= leg.entry_fee
 
         return total
 
@@ -248,11 +280,16 @@ class Portfolio:
                 underlying: str, spot_price: float) -> dict:
         unrealized = self.total_unrealized_pnl(as_of_date, data_source, underlying, spot_price)
         realized = self.total_realized_pnl()
+        entry_value = sum((1 if leg.action == LegAction.BUY else -1)
+                          * leg.entry_price * CONTRACT_MULTIPLIER * leg.quantity
+                          for leg in self.open_legs())
+        market_value = entry_value + unrealized + sum(l.entry_fee for l in self.open_legs())
         return {
             "cash": self.cash,
+            "market_value": market_value,
             "realized_pnl": realized,
             "unrealized_pnl": unrealized,
-            "total_equity": self.cash + unrealized,
+            "total_equity": self.cash + market_value,
             "open_leg_count": len(self.open_legs()),
             "closed_leg_count": len(self.closed_legs()),
         }
@@ -263,15 +300,21 @@ class Portfolio:
 
     def to_dict(self) -> dict:
         return {
+            "starting_cash": self.starting_cash,
             "cash": self.cash,
             "legs": [leg.to_dict() for leg in self._legs],
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Portfolio":
-        # `cash` here is the CURRENT balance (already reflecting all past
-        # activity), not the original starting balance -- Portfolio doesn't
-        # distinguish the two, so this is the correct field to restore into.
-        portfolio = cls(starting_cash=data["cash"])
+        # Current cash may be negative even with a positive starting balance.
+        portfolio = cls(starting_cash=data.get("starting_cash", max(data["cash"], 0)))
+        portfolio.cash = data["cash"]
         portfolio._legs = [Leg.from_dict(leg_data) for leg_data in data["legs"]]
+        entry_value = sum((1 if l.action == LegAction.BUY else -1)
+                          * l.entry_price * CONTRACT_MULTIPLIER * l.quantity
+                          for l in portfolio.open_legs())
+        portfolio.starting_cash = data.get(
+            "starting_cash", portfolio.cash - portfolio.total_realized_pnl() + entry_value
+            + sum(l.entry_fee for l in portfolio.open_legs()))
         return portfolio
